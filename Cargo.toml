@@ -25,9 +25,13 @@ aide = { version = "0.11.0", features = ["axum"] }
 tokio = { version = "1.29.1", features = ["full"] }
 axum-jsonschema = { version = "0.6.0", features = ["aide"] }
 tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }
-clap = { version = "4.1.8", features = ["derive"] }
-llm = { git = "https://github.com/rustformers/llm" , branch = "main" }
+clap = { version = "4.1.8", features = ["derive"], optional = true }
+llm = { git = "https://github.com/rustformers/llm" , branch = "main", optional = true}
 rand = "0.8.5"
 
 [build-dependencies]
 chrono = "0.4.26"
+
+
+[features]
+llm = ["dep:llm","dep:clap"]

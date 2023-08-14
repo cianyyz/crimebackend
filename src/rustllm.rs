@@ -22,8 +22,8 @@ pub struct LLMModel {
 impl LLMModel {
 	pub fn new(args: LLMModelArgs) -> Self {
         let tokenizer_source: llm::TokenizerSource = args.to_tokenizer_source();
-        let model_architecture: ModelArchitecture = args.model_architecture;
-        let model_path: PathBuf = args.model_path;
+        let model_architecture: ModelArchitecture = args.model_architecture.unwrap();
+        let model_path: PathBuf = args.model_path.unwrap();
         let model_params: llm::ModelParameters = llm::ModelParameters::default();
         let inference_parameters: llm::InferenceParameters = llm::InferenceParameters::default();
         let model: Box<dyn Model> = llm::load_dynamic(

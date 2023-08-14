@@ -1,6 +1,4 @@
-use aide::{
-	axum::{routing::{post}, ApiRouter}
-};
+use aide::axum::{routing::post, ApiRouter};
 use axum::{http::StatusCode, Extension};
 use axum_jsonschema::Json;
 use schemars::JsonSchema;

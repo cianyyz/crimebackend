@@ -1,7 +1,7 @@
-use aide::{
-	axum::{routing::{post}, ApiRouter},
-};
-use axum::{Extension};
+
+
+use aide::axum::{routing::post, ApiRouter};
+use axum::Extension;
 use axum_jsonschema::Json;
 use schemars::JsonSchema;
 
