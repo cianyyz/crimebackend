@@ -1,11 +1,12 @@
-use anyhow::Context;
+
 use axum::Extension;
-use lazy_static::lazy_static;
 use rayon::prelude::*;
 use schemars::JsonSchema;
+use anyhow::Context;
+use lazy_static::lazy_static;
 use std::{
 	collections::{BinaryHeap, HashMap},
-	fs,
+	fs::{self},
 	path::PathBuf,
 	sync::Arc,
 };
@@ -30,6 +31,9 @@ pub enum Error {
 
 	#[error("The dimension of the vector doesn't match the dimension of the collection")]
 	DimensionMismatch,
+
+	#[error("ID doesn't exist within collection")]
+	IDNotFound
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -41,6 +45,28 @@ pub struct Db {
 pub struct SimilarityResult {
 	score: f32,
 	embedding: Embedding,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, JsonSchema)]
+pub enum MetadataEqualities{
+	GreaterEqualThan,
+	GreaterThan,
+	LesserEqualThan,
+	LesserThan,
+	Equal
+}
+
+impl MetadataEqualities {
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "greater_equal_than" => Some(MetadataEqualities::GreaterEqualThan),
+            "greater_than" => Some(MetadataEqualities::GreaterThan),
+            "lesser_equal_than" => Some(MetadataEqualities::LesserEqualThan),
+            "lesser_than" => Some(MetadataEqualities::LesserThan),
+            "equal" => Some(MetadataEqualities::Equal),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, JsonSchema)]
@@ -55,6 +81,66 @@ pub struct Collection {
 }
 
 impl Collection {
+	pub fn get_id(&self, id: &String) -> Option<Embedding>{
+		self.embeddings
+		.iter()
+		.find(|embedding| &embedding.id == id)
+		.cloned()
+	}
+
+	pub fn delete_id(&mut self, id: &String) -> Result<Embedding, Error>{
+		 if let Some(index) = self.embeddings.iter().position(|embedding| &embedding.id == id) {
+            // Remove the embedding from the vector and return it
+            Ok(self.embeddings.remove(index))
+        } else {
+            // If the id is not found, return an error
+            return Err(Error::IDNotFound);
+        }
+	}
+	pub fn get_metadata_string(&self, key: &String, value: &String, k: usize) -> Vec<Embedding>{
+		let filtered_embeddings: Vec<Embedding> = self.embeddings
+            .iter()
+            .filter(|embedding| {
+                if let Some(metadata) = &embedding.metadata {
+                    if let Some(meta_value) = metadata.get(key) {
+                        return meta_value == value;
+                    }
+                }
+                false
+            })
+            .cloned()
+            .collect();
+		
+		filtered_embeddings.into_iter().take(k).collect()
+    }
+
+	pub fn get_metadata_number(&self, key: &str, value: f32, equality: MetadataEqualities, k: usize) -> Vec<Embedding> {
+        // Filter embeddings based on the specified key and value comparison
+        let filtered_embeddings: Vec<Embedding> =  self.embeddings
+            .iter()
+            .filter(|embedding| {
+                if let Some(metadata) = &embedding.metadata {
+                    if let Some(meta_value_str) = metadata.get(key) {
+                        if let Ok(meta_value) = meta_value_str.parse::<f32>() {
+							match equality {
+								MetadataEqualities::GreaterEqualThan => {return meta_value >= value;},
+								MetadataEqualities::GreaterThan => {return meta_value > value;},
+								MetadataEqualities::LesserEqualThan => {return meta_value <= value;}
+								MetadataEqualities::LesserThan => {return meta_value < value;}
+								MetadataEqualities::Equal => {return meta_value == value;}
+							}
+                            
+                        }
+                    }
+                }
+                false
+            })
+            .cloned()
+            .collect();
+		
+		filtered_embeddings.into_iter().take(k).collect()
+    }
+
 	pub fn get_similarity(&self, query: &[f32], k: usize) -> Vec<SimilarityResult> {
 		let memo_attr = get_cache_attr(self.distance, query);
 		let distance_fn = get_distance_fn(self.distance);
@@ -125,7 +211,7 @@ impl Db {
 		};
 
 		self.collections.insert(name, collection.clone());
-
+		self.save();
 		Ok(collection)
 	}
 
@@ -135,7 +221,7 @@ impl Db {
 		}
 
 		self.collections.remove(name);
-
+		self.save();
 		Ok(())
 	}
 
@@ -149,10 +235,6 @@ impl Db {
 			.get_mut(collection_name)
 			.ok_or(Error::NotFound)?;
 
-		if collection.embeddings.iter().any(|e| e.id == embedding.id) {
-			return Err(Error::UniqueViolation);
-		}
-
 		if embedding.vector.len() != collection.dimension {
 			return Err(Error::DimensionMismatch);
 		}
@@ -162,10 +244,25 @@ impl Db {
 			embedding.vector = normalize(&embedding.vector);
 		}
 
-		collection.embeddings.push(embedding);
+		if collection.embeddings.iter().any(|e| e.id == embedding.id) {
+			let _ = collection.delete_id(&embedding.id);
+		}
 
+		collection.embeddings.push(embedding);
+		self.save();
 		Ok(())
 	}
+
+	pub fn collection_delete_id(&mut self, collection_name: &str, id: &String) -> Result<Embedding, Error>{
+		let collection = self
+			.collections
+			.get_mut(collection_name)
+			.ok_or(Error::NotFound)?;
+		let result = collection.delete_id(id);
+		self.save();
+		result
+	}
+
 
 	pub fn get_collection(&self, name: &str) -> Option<&Collection> {
 		self.collections.get(name)
@@ -191,11 +288,15 @@ impl Db {
 
 		Ok(())
 	}
+
+	pub fn save(&self){
+		self.save_to_store().ok();
+	}
 }
 
 impl Drop for Db {
 	fn drop(&mut self) {
-		tracing::debug!("Saving database to store");
+		tracing::info!("Saving database to store");
 		self.save_to_store().ok();
 	}
 }

@@ -8,7 +8,7 @@ use schemars::JsonSchema;
 use std::time::Instant;
 
 use crate::{
-	db::{self, Collection, DbExtension, Embedding, Error as DbError, SimilarityResult},
+	db::{self, Collection, DbExtension, Embedding, Error as DbError, SimilarityResult, MetadataEqualities},
 	errors::HTTPError,
 	similarity::Distance,
 };
@@ -21,7 +21,11 @@ pub fn handler() -> ApiRouter {
 			.api_route("/:collection_name", post(query_collection))
 			.api_route("/:collection_name", get(get_collection_info))
 			.api_route("/:collection_name", delete(delete_collection))
-			.api_route("/:collection_name/insert", post(insert_into_collection)),
+			.api_route("/:collection_name/insert", post(insert_into_collection))
+			.api_route("/:collection_name/:id", get(query_id_collection))
+			.api_route("/:collection_name/:id", delete(delete_id_collection))
+			.api_route("/:collection_name/query", post(query_metadata_string_collection))
+			.api_route("/:collection_name/querynum", post(query_metadata_number_collection))
 	)
 }
 
@@ -39,7 +43,6 @@ async fn create_collection(
 	let mut db = db.write().await;
 
 	let create_result = db.create_collection(collection_name, req.dimension, req.distance);
-	drop(db);
 
 	match create_result {
 		Ok(_) => Ok(StatusCode::CREATED),
@@ -78,7 +81,7 @@ async fn query_collection(
 
 	let instant = Instant::now();
 	let results = collection.get_similarity(&req.query, req.k.unwrap_or(1));
-	drop(db);
+
 
 	tracing::trace!("Query to {collection_name} took {:?}", instant.elapsed());
 	Ok(Json(results))
@@ -127,7 +130,6 @@ async fn delete_collection(
 	let mut db = db.write().await;
 
 	let delete_result = db.delete_collection(&collection_name);
-	drop(db);
 
 	match delete_result {
 		Ok(_) => Ok(StatusCode::NO_CONTENT),
@@ -149,7 +151,6 @@ async fn insert_into_collection(
 	let mut db = db.write().await;
 
 	let insert_result = db.insert_into_collection(&collection_name, embedding);
-	drop(db);
 
 	match insert_result {
 		Ok(_) => Ok(StatusCode::CREATED),
@@ -161,7 +162,111 @@ async fn insert_into_collection(
 		},
 		Err(DbError::DimensionMismatch) => Err(HTTPError::new(
 			"The provided vector has the wrong dimension",
-		)
-		.with_status(StatusCode::BAD_REQUEST)),
+		).with_status(StatusCode::BAD_REQUEST)),
+		Err(_)=>Err(HTTPError::new(
+			"Unknown Error",
+		).with_status(StatusCode::BAD_REQUEST)),
 	}
+}
+
+async fn query_id_collection(
+	Path((collection_name, id)): Path<(String, String)>,
+	Extension(db): DbExtension,
+) -> Result<Json<Embedding>, HTTPError> {
+	tracing::trace!("Getting query info for {id} in {collection_name}");
+
+	let db = db.read().await;
+	let collection = db
+		.get_collection(&collection_name)
+		.ok_or_else(|| HTTPError::new("Collection not found").with_status(StatusCode::NOT_FOUND))?;
+
+	let instant = Instant::now();
+	let result = collection.get_id(&id);
+
+	tracing::trace!("Query ID {id} for {collection_name} took {:?}", instant.elapsed());
+	match result {
+		Some(embed) => Ok(Json(embed)),
+		None => Err(HTTPError::new("No item found of ID").with_status(StatusCode::BAD_REQUEST))
+	}
+}
+
+async fn delete_id_collection(
+	Path((collection_name, id)): Path<(String, String)>,
+	Extension(db): DbExtension,
+) -> Result<StatusCode, HTTPError> {
+	tracing::trace!("Deleting id {id} from {collection_name}");
+
+	let mut db = db.write().await;
+
+	//let delete_result = db.delete_collection(&collection_name);
+	let delete_result: Result<Embedding, DbError> = db.collection_delete_id(&collection_name, &id);
+
+	match delete_result {
+		Ok(_) => Ok(StatusCode::NO_CONTENT),
+		Err(DbError::NotFound) => {
+			Err(HTTPError::new("Collection not found").with_status(StatusCode::NOT_FOUND))
+		},
+		Err(DbError::IDNotFound) => {
+			Err(HTTPError::new("ID not found within specified collection").with_status(StatusCode::NOT_FOUND))
+		},
+		Err(_) => Err(HTTPError::new("Couldn't delete ID")),
+	}
+}
+
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+struct QueryMetadataString{
+	key: String,
+	value: String,
+	k: Option<usize>,
+}
+
+async fn query_metadata_string_collection(
+	Path(collection_name): Path<String>,
+	Extension(db): DbExtension,
+	Json(req): Json<QueryMetadataString>,
+) -> Result<Json<Vec<Embedding>>, HTTPError> {
+	tracing::trace!("Metadata query for {collection_name}");
+
+	let db = db.read().await;
+	let collection = db
+		.get_collection(&collection_name)
+		.ok_or_else(|| HTTPError::new("Collection not found").with_status(StatusCode::NOT_FOUND))?;
+
+	let instant = Instant::now();
+	let result = collection.get_metadata_string(&req.key, &req.value, req.k.unwrap_or(5));
+
+	tracing::trace!("Metadata Query for {collection_name} took {:?}", instant.elapsed());
+	Ok(Json(result))
+}
+
+
+#[derive(Debug, serde::Deserialize, JsonSchema)]
+struct QueryMetadataNumber{
+	key: String,
+	value: f32,
+	equality: String,
+	k: Option<usize>,
+}
+
+async fn query_metadata_number_collection(
+	Path(collection_name): Path<String>,
+	Extension(db): DbExtension,
+	Json(req): Json<QueryMetadataNumber>,
+) -> Result<Json<Vec<Embedding>>, HTTPError> {
+	tracing::trace!("Metadata query for {collection_name}");
+
+	let db = db.read().await;
+	let collection = db
+		.get_collection(&collection_name)
+		.ok_or_else(|| HTTPError::new("Collection not found").with_status(StatusCode::NOT_FOUND))?;
+
+	let instant = Instant::now();
+	let eq = match MetadataEqualities::from_str(&req.equality.as_str()){
+		Some(eq) => eq,
+		None => return Err(HTTPError::new("Invalid equality string. Acceptable inputs; greater_than, greater_equal_than, lesser_than, lesser_equal_than, equal").with_status(StatusCode::BAD_REQUEST))
+	};
+	let result = collection.get_metadata_number(&req.key, req.value, eq, req.k.unwrap_or(5));
+
+	tracing::trace!("Metadata Query for {collection_name} took {:?}", instant.elapsed());
+	Ok(Json(result))
 }
